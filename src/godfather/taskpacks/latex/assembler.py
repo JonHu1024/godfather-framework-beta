@@ -132,7 +132,24 @@ def _render_emphasis(segment: str) -> str:
     return f"{prefix}{wrapped}{suffix}"
 
 
-def _convert_inline(text: str, *, escape_alignment: bool = False) -> str:
+def _to_table_inline_math(math_tex: str) -> str:
+    """把表格单元格内的独立显示公式（$$...$$ / \\[...\\]）转为带 \\displaystyle 的行内公式。"""
+    stripped = math_tex.strip()
+    if stripped.startswith("$$") and stripped.endswith("$$") and len(stripped) >= 4:
+        inner = stripped[2:-2].strip()
+        return f"$\\displaystyle {inner}$" if inner else ""
+    if stripped.startswith(r"\[") and stripped.endswith(r"\]") and len(stripped) >= 4:
+        inner = stripped[2:-2].strip()
+        return f"$\\displaystyle {inner}$" if inner else ""
+    return math_tex
+
+
+def _convert_inline(
+    text: str,
+    *,
+    escape_alignment: bool = False,
+    inline_display_math: bool = False,
+) -> str:
     """段落内联转换：按“行内代码 → 数学公式 → 图片 → 强调/转义”顺序处理。
 
     行内代码必须在数学公式之前剥离，避免 ``$HOME`` 或 ``a + $x$`` 跨代码块配对成伪公式；
@@ -152,11 +169,13 @@ def _convert_inline(text: str, *, escape_alignment: bool = False) -> str:
 
     work = _INLINE_CODE_RE.sub(_take_code, text)
 
-    # 2. 再提取数学公式（保留公式内的 * _ & 等符号，仅在表格对齐场景转义裸 &）
+    # 2. 再提取数学公式（表格内将 $$ / \[...\] 降级为 \displaystyle 行内公式，并转义裸 &）
     parts = INLINE_MATH_RE.split(work)
     math_protected: list[str] = []
     for index, part in enumerate(parts):
         if index % 2 == 1:
+            if inline_display_math:
+                part = _to_table_inline_math(part)
             if escape_alignment:
                 part = re.sub(r"(?<!\\)&", r"\\&", part)
             math_protected.append(_stash(part))
@@ -366,9 +385,10 @@ def render_block(block: Block, teacher_tex: str | None = None) -> tuple[str, lis
             if position == 1 and re.match(r"^\s*\|?\s*:?-{2,}", row):
                 continue
             cells = _split_row(row)
-            # 表格里必须转义对齐符：单元格内的数学片段带 & 会让编译失败
+            # 表格里必须转义对齐符，并把 $$...$$ / \[...\] 转为 \displaystyle 行内公式，
+            # 否则在 tabular/longtable/tabularx 单元格中会触发 Missing $ inserted。
             rendered = " & ".join(
-                _convert_inline(cell, escape_alignment=True) for cell in cells
+                _convert_inline(cell, escape_alignment=True, inline_display_math=True) for cell in cells
             )
             body_rows.append(f"  {rendered} \\\\")
         env = "longtable" if len(rows) > 12 else "tabular"

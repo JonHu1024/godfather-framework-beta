@@ -798,3 +798,153 @@ def test_report_bug4_generation_api_force_rerun(client, monkeypatch):
         assert client.get(f"/api/artifacts/{g['tex_artifact_id']}/content").status_code == 200
         assert client.get(f"/api/artifacts/{g['pdf_artifact_id']}/content").status_code == 200
 
+
+# --------------------------------------------------------------------------
+# cfb6400 表格编译回归修复：规则模式表格内显示公式 + Pandoc 无标题表格兼容
+# --------------------------------------------------------------------------
+def test_report_cfb6400_rule_only_table_display_math(tmp_path):
+    """表格单元格内的 $$...$$ 与 \\[...\\] 应转为带 \\displaystyle 的行内公式，正文独立公式与粗体/代码保持正常。"""
+    from godfather.settings import Settings
+    from godfather.taskpacks.latex import assembler, compiler as comp
+
+    md_text = (
+        "# 公式与表格混合测试\n\n"
+        "正文中保留 **加粗文本** 与行内代码 `rate * 2 + $x$`，以及独立公式：\n\n"
+        "$$\n\\int_0^1 x^2 \\, dx = \\frac{1}{3}\n$$\n\n"
+        "| 公式类型 | 表达式 | 说明 |\n"
+        "| :--- | :--- | :--- |\n"
+        "| 积分公式 | $$\\int_0^1 x^2 \\, dx = \\frac{1}{3}$$ | 双美元符 |\n"
+        "| 求和公式 | \\[\\sum_{i=1}^n i = \\frac{n(n+1)}{2}\\] | 方括号公式 |\n"
+        "| 含对齐符 | $\\alpha_1 & \\beta_2$ | 正常表格公式 |\n"
+    )
+    parsed = parse_markdown(md_text)
+    assembled = assembler.assemble_document(
+        parsed.blocks,
+        settings=Settings(),
+        title="表格公式测试",
+        template_name="preamble_zh_ctex",
+    )
+    body = assembled.tex.split(r"\begin{document}", 1)[1]
+
+    assert r"\textbf{加粗文本}" in body
+    assert r"\texttt{rate * 2 + \$x\$}" in body
+    assert r"\begin{equation}" in body
+    assert r"$\displaystyle \int_0^1 x^2 \, dx = \frac{1}{3}$" in body
+    assert r"$\displaystyle \sum_{i=1}^n i = \frac{n(n+1)}{2}$" in body
+    assert r"$\alpha_1 \& \beta_2$" in body
+    # 表格内部不能残留 $$ 或 \[...\] 显示公式定界符
+    table_chunk = body.split(r"\begin{tabular}", 1)[1].split(r"\end{tabular}", 1)[0]
+    assert "$$" not in table_chunk
+    assert r"\[" not in table_chunk
+
+    binary, _ = comp.detect_engine(Settings())
+    if binary:
+        res = comp.compile_tex(
+            assembled.tex,
+            settings=Settings(),
+            work_root=tmp_path,
+            job_id="rule_table_display_math",
+        )
+        assert res.ok, f"规则模式表格显示公式编译失败：{res.error}\n{res.log[-600:]}"
+        assert Path(res.pdf_path).read_bytes().startswith(b"%PDF-")
+
+
+def test_report_cfb6400_pandoc_captionless_longtable_compat(tmp_path, monkeypatch):
+    """Pandoc 生成的 \\def\\LTcaptype{none} 应随 longtable 版本兼容改写，且不影响有标题表格与比例列宽编译。"""
+    from godfather.settings import Settings
+    from godfather.taskpacks.latex import compiler as comp, pandoc_base as pb
+    from godfather.taskpacks.latex.pipeline import wrap_body
+
+    sample_pandoc_tex = (
+        "{\n"
+        "\\def\\LTcaptype{none}\n"
+        "\\begin{longtable}[]{@{}ll@{}}\n"
+        "\\toprule\\noalign{}\n"
+        "无标题列1 & 无标题列2 \\\\\n"
+        "\\midrule\\noalign{}\n"
+        "\\endhead\n"
+        "\\bottomrule\\noalign{}\n"
+        "\\endlastfoot\n"
+        "值1 & 值2 \\\\\n"
+        "\\end{longtable}\n"
+        "}\n\n"
+        "\\begin{longtable}[]{@{}\n"
+        "  >{\\raggedright\\arraybackslash}p{(\\linewidth - 2\\tabcolsep) * \\real{0.5000}}\n"
+        "  >{\\raggedright\\arraybackslash}p{(\\linewidth - 2\\tabcolsep) * \\real{0.5000}}@{}}\n"
+        "\\caption{带编号表格}\\tabularnewline\n"
+        "\\toprule\\noalign{}\n"
+        "比例列A & 比例列B \\\\\n"
+        "\\midrule\\noalign{}\n"
+        "\\endhead\n"
+        "\\bottomrule\\noalign{}\n"
+        "\\endlastfoot\n"
+        "内容A & 内容B \\\\\n"
+        "\\end{longtable}\n"
+    )
+
+    class _FakeProc:
+        def __init__(self, stdout: str, returncode: int = 0):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = returncode
+
+    new_sty = tmp_path / "new_longtable.sty"
+    new_sty.write_text(
+        r"\ProvidesPackage{longtable}[2024-10-27 v4.22]" "\n" r"\tl_if_empty:eTF { \LTcaptype }",
+        encoding="utf-8",
+    )
+    old_sty = tmp_path / "old_longtable.sty"
+    old_sty.write_text(
+        r"\ProvidesPackage{longtable}[2020/01/07 v4.13 Multi-page Table package (DPC)]"
+        "\n"
+        r"\refstepcounter{\LTcaptype}",
+        encoding="utf-8",
+    )
+
+    active_sty = new_sty
+
+    def _fake_run(args, **_kwargs):
+        if "kpsewhich" in str(args[0]):
+            return _FakeProc(str(active_sty))
+        if "--version" in args:
+            return _FakeProc("pandoc 3.14")
+        return _FakeProc(sample_pandoc_tex)
+
+    monkeypatch.setattr(pb, "_find_kpsewhich", lambda _settings: "mock-kpsewhich")
+    monkeypatch.setattr(pb.subprocess, "run", _fake_run)
+
+    # 1) 新版 longtable（2024+ 以空值表示不编号）
+    pb._inspect_longtable_sty_empty_captype.cache_clear()
+    res_new = pb.convert_fragment("dummy", Settings())
+    assert res_new.ok is True
+    assert r"\def\LTcaptype{}" in res_new.tex
+    assert r"\def\LTcaptype{none}" not in res_new.tex
+    assert r"\caption{带编号表格}" in res_new.tex
+
+    # 2) 旧版 longtable（< 2024）保持原样
+    active_sty = old_sty
+    pb._inspect_longtable_sty_empty_captype.cache_clear()
+    res_old = pb.convert_fragment("dummy", Settings())
+    assert res_old.ok is True
+    assert r"\def\LTcaptype{none}" in res_old.tex
+
+    # 3) 若本机存在 real kpsewhich + xelatex，用真实引擎核验兼容结果可编出 PDF
+    monkeypatch.undo()
+    pb._inspect_longtable_sty_empty_captype.cache_clear()
+    binary, _ = comp.detect_engine(Settings())
+    if binary and pb._find_kpsewhich(Settings()):
+        compat = pb._compat_captionless_longtable(
+            sample_pandoc_tex,
+            empty_captype=pb._longtable_uses_empty_captype(Settings()),
+        )
+        for idx, tpl_name in enumerate(("preamble_zh_ctex", "preamble_en_academic")):
+            doc = wrap_body(compat, Settings(), template_name=tpl_name, title="Pandoc 无标题表格兼容测试")
+            c_res = comp.compile_tex(
+                doc,
+                settings=Settings(),
+                work_root=tmp_path,
+                job_id=f"pandoc_ltcap_{idx}",
+            )
+            assert c_res.ok, f"{tpl_name} 编译失败：{c_res.error}\n{c_res.log[-600:]}"
+            assert Path(c_res.pdf_path).read_bytes().startswith(b"%PDF-")
+

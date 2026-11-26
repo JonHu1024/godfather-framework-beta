@@ -5,9 +5,13 @@ Pandoc 负责"确定性可做"的部分（结构转换），loc/教师负责"语
 """
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 
@@ -86,6 +90,84 @@ def _safe_extensions(extensions: list[str]) -> list[str]:
     return safe
 
 
+_LTCAPTYPE_NONE_RE = re.compile(r"((?:^|\{)\s*)\\def\\LTcaptype\{none\}", re.MULTILINE)
+_LONGTABLE_PROVIDES_RE = re.compile(r"\\ProvidesPackage\{longtable\}\s*\[\s*(\d{4})[-/](\d{2})[-/](\d{2})")
+
+
+def _find_kpsewhich(settings: Any) -> str:
+    """定位与当前 LaTeX 发行版配套的 kpsewhich，用于检测 longtable 宏包版本。"""
+    candidates: list[str] = []
+    try:
+        from .compiler import detect_engine
+
+        engine, _ = detect_engine(settings)
+        if engine:
+            engine_dir = Path(engine).resolve().parent
+            for name in ("kpsewhich.exe", "kpsewhich.EXE", "kpsewhich"):
+                candidates.append(str(engine_dir / name))
+    except Exception:
+        pass
+    which_kp = shutil.which("kpsewhich")
+    if which_kp:
+        candidates.append(which_kp)
+    for cand in candidates:
+        if Path_exists(cand):
+            return cand
+    return ""
+
+
+@lru_cache(maxsize=8)
+def _inspect_longtable_sty_empty_captype(kpsewhich_bin: str) -> bool:
+    """检查 longtable.sty 是否以空 \\LTcaptype 表示无编号（2024+ 新版行为）。"""
+    if not kpsewhich_bin:
+        return False
+    try:
+        proc = subprocess.run(
+            [kpsewhich_bin, "longtable.sty"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+        sty_path = (proc.stdout or "").strip().splitlines()
+        if not sty_path:
+            return False
+        content = Path(sty_path[0].strip()).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+
+    if r"\tl_if_empty" in content and "LTcaptype" in content:
+        return True
+    match = _LONGTABLE_PROVIDES_RE.search(content)
+    if match:
+        return int(match.group(1)) >= 2024
+    return False
+
+
+def _longtable_uses_empty_captype(settings: Any) -> bool:
+    """在单元测试禁用外部命令或未装 TeX 时，尊重环境变量/kpsewhich 自动检测结果。"""
+    override = os.environ.get("GODFATHER_LONGTABLE_EMPTY_CAPTYPE", "").strip().lower()
+    if override in {"1", "true", "yes"}:
+        return True
+    if override in {"0", "false", "no"}:
+        return False
+    return _inspect_longtable_sty_empty_captype(_find_kpsewhich(settings))
+
+
+def _compat_captionless_longtable(tex: str, *, empty_captype: bool) -> str:
+    """按 longtable 版本兼容 Pandoc 生成的无标题表格标记（保留有标题表格正常编号）。
+
+    Pandoc 3.x 为无标题表格输出 ``\\def\\LTcaptype{none}``；
+    新版 longtable（TeX Live 2024+）改用空值 ``\\def\\LTcaptype{}`` 表示不编号，
+    否则会触发 ``No counter 'none' defined``。
+    """
+    if not empty_captype or r"\def\LTcaptype{none}" not in tex:
+        return tex
+    return _LTCAPTYPE_NONE_RE.sub(lambda m: f"{m.group(1)}\\def\\LTcaptype{{}}", tex)
+
+
 def convert_fragment(markdown: str, settings: Any, *, extra_args: list[str] | None = None) -> PandocResult:
     """把一段 Markdown 转成 LaTeX 片段（不含导言区）。"""
     binary = pandoc_binary(settings)
@@ -128,4 +210,9 @@ def convert_fragment(markdown: str, settings: Any, *, extra_args: list[str] | No
             error=(proc.stderr or "pandoc 转换失败")[:2000],
             duration_ms=duration,
         )
-    return PandocResult(ok=True, tex=proc.stdout or "", duration_ms=duration, version=pandoc_version(settings))
+    raw_tex = proc.stdout or ""
+    compat_tex = _compat_captionless_longtable(
+        raw_tex,
+        empty_captype=_longtable_uses_empty_captype(settings),
+    )
+    return PandocResult(ok=True, tex=compat_tex, duration_ms=duration, version=pandoc_version(settings))

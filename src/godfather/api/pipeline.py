@@ -25,6 +25,7 @@ class GenerationCreate(BaseModel):
     provider: str = ""
     model: str = ""
     template_name: str = "preamble_zh_ctex"
+    force: bool = False
 
 
 class AnnotationCreate(BaseModel):
@@ -114,6 +115,12 @@ def create_generation(project_id: str, payload: GenerationCreate, ctx: AppContex
         or "ollama"
     )
     job_kind = (spec.default_job_kind if spec and spec.default_job_kind else "latex.generate")
+    base_key = (
+        f"{job_kind}:{payload.document_id}:{document_revision}"
+        f":{payload.mode}:{effective_provider}:{payload.model or ''}"
+        f":{payload.template_name or 'preamble_zh_ctex'}"
+    )
+    idempotency_key = f"{base_key}:force:{new_id('run')}" if payload.force else base_key
     job = ctx.queue.submit(
         job_kind,
         {
@@ -123,13 +130,10 @@ def create_generation(project_id: str, payload: GenerationCreate, ctx: AppContex
             "provider": effective_provider,
             "model": payload.model,
             "template_name": payload.template_name or "preamble_zh_ctex",
+            "force": bool(payload.force),
         },
         project_id=project_id,
-        idempotency_key=(
-            f"{job_kind}:{payload.document_id}:{document_revision}"
-            f":{payload.mode}:{effective_provider}:{payload.model or ''}"
-            f":{payload.template_name or 'preamble_zh_ctex'}"
-        ),
+        idempotency_key=idempotency_key,
     )
     return {
         "job_id": job["id"],

@@ -675,6 +675,7 @@ def _finalize(
     annotation_ids: list[str] | None = None,
     example_extra: dict[str, Any] | None = None,
     fallback_tex: str | None = None,
+    raise_on_fail: bool = True,
 ) -> dict:
     tex_artifact = ctx.store.put_bytes(
         project_id,
@@ -770,6 +771,7 @@ def _finalize(
         document_id=document_id,
         meta={"generation_id": generation_id, "exit_code": compile_result.exit_code},
     )
+    compile_info["log_artifact_id"] = log_artifact["id"]
 
     source_text = "\n\n".join(b.text for b in blocks)
     reports = validators.run_all(
@@ -872,18 +874,40 @@ def _finalize(
         stage="validate",
         message=f"四层检查完成：{verdict}",
         payload={"verdict": verdict, "reports": stats["validation"]},
-        artifact_ids=[tex_artifact["id"]] + ([pdf_artifact_id] if pdf_artifact_id else []),
+        artifact_ids=[tex_artifact["id"], log_artifact["id"]] + ([pdf_artifact_id] if pdf_artifact_id else []),
     )
 
-    return {
+    outcome = {
         "generation_id": generation_id,
         "tex_artifact_id": tex_artifact["id"],
         "pdf_artifact_id": pdf_artifact_id,
         "log_artifact_id": log_artifact["id"],
         "verdict": verdict,
+        "compile_ok": bool(compile_result.ok),
+        "compile_error": compile_result.error or "",
         "validation_report_ids": report_ids,
         "stats": stats,
     }
+    if raise_on_fail and (not compile_result.ok or verdict == "fail"):
+        from ...jobs import PermanentJobError
+
+        raise PermanentJobError(_failure_summary(compile_result, reports, verdict), result=outcome)
+    return outcome
+
+
+def _failure_summary(compile_result: Any, reports: list[dict], verdict: str) -> str:
+    """提取便于队列与 UI 展示的失败原因。"""
+    if not getattr(compile_result, "ok", True):
+        err = (getattr(compile_result, "error", "") or "").strip()
+        return err or f"LaTeX 编译失败（退出码 {getattr(compile_result, 'exit_code', -1)}）"
+    for rep in reports or []:
+        if rep.get("verdict") == "fail":
+            for finding in rep.get("findings") or []:
+                if finding.get("level") == "fail" and finding.get("message"):
+                    return str(finding["message"])
+            if rep.get("summary"):
+                return str(rep["summary"])
+    return f"四层质量校验未通过（{verdict}）"
 
 
 def _wait_on_teacher_questions(policy: Any) -> bool:
@@ -1183,13 +1207,15 @@ def run_revision(
         assets=assembled.assets,
         label_origin="human_reviewed_teacher",
         annotation_ids=[annotation_id],
+        raise_on_fail=False,
     )
 
     # H9: 只有修订真的通过验证，批注才能标成"已接受"；
     # 编译失败/内容层判 fail 时，批注必须留在未解决状态，
     # 否则用户看到"已接受"但其实什么都没修好。
     revision_verdict = str(outcome.get("verdict") or "")
-    if revision_verdict == "fail":
+    compile_ok = bool(outcome.get("compile_ok", True))
+    if revision_verdict == "fail" or not compile_ok:
         ctx.db.update(
             "annotations",
             annotation_id,
@@ -1199,6 +1225,21 @@ def run_revision(
             stage="revision",
             message=f"修订未通过验证（{revision_verdict}），批注保持未解决状态",
             level="warning",
+        )
+        from ...jobs import PermanentJobError
+
+        fail_detail = outcome.get("compile_error") or f"修订未通过验证（{revision_verdict}）"
+        raise PermanentJobError(
+            fail_detail,
+            result={
+                **outcome,
+                "annotation_id": annotation_id,
+                "block_id": ordered_ids[0],
+                "block_ids": ordered_ids,
+                "new_tex": new_tex,
+                "block_updates": block_updates,
+                "annotation_status": "open",
+            },
         )
     else:
         ctx.db.update(

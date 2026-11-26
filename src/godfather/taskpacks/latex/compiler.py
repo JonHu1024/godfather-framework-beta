@@ -608,7 +608,7 @@ def compile_tex(
             output_dir_arg = windows_path_for(Path(work_root) / "compile" / job_id)
             pending_copies = [(Path(work_root) / "compile" / job_id / main_filename, output_dir_arg)]
 
-    work_dir = Path(work_root) / "compile" / job_id
+    work_dir = Path(work_root).resolve() / "compile" / job_id
     if work_dir.exists():
         shutil.rmtree(work_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -748,6 +748,38 @@ def compile_tex(
     # 配置里的 passes 以前只是摆设（实际只编一遍）。
     passes = max(1, min(int(getattr(cfg, "passes", 1) or 1), 5))
     for _pass_index in range(passes):
+        if IS_WINDOWS:
+            from . import win_sandbox
+
+            try:
+                sb_res = win_sandbox.run_sandboxed(
+                    args,
+                    work_dir=work_dir,
+                    env=env,
+                    timeout_seconds=timeout,
+                    job_label=f"{job_id}-p{_pass_index + 1}",
+                )
+            except win_sandbox.SandboxInitError as exc:
+                return CompileResult(
+                    ok=False,
+                    engine=cfg.engine,
+                    binary=binary,
+                    exit_code=-5,
+                    error=f"Windows 编译隔离环境初始化失败：{exc}",
+                    work_dir=str(work_dir),
+                )
+            stdout = sb_res.stdout or ""
+            exit_code = sb_res.exit_code
+            if sb_res.timed_out:
+                timed_out = True
+                error = sb_res.error or f"编译超时（>{timeout}s），已终止沙箱进程树"
+            elif sb_res.error and not error:
+                error = sb_res.error
+            pass_logs.append(stdout)
+            if timed_out or exit_code != 0:
+                break
+            continue
+
         try:
             proc = subprocess.Popen(
                 args,
@@ -760,8 +792,7 @@ def compile_tex(
                 errors="replace",
                 **kwargs,
             )
-            if not IS_WINDOWS:
-                _apply_limits(proc.pid, cpu_seconds, memory_mb, file_mb)
+            _apply_limits(proc.pid, cpu_seconds, memory_mb, file_mb)
             try:
                 stdout, _ = proc.communicate(timeout=timeout)
                 exit_code = proc.returncode

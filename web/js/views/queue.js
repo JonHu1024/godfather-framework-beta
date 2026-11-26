@@ -10,11 +10,20 @@ const FALLBACK_MODES = [
   { id: "teacher_direct", label: "teacher_direct（教师模型直出，用于 SFT）", uses_teacher: true },
 ];
 
+// 按项目记住发射表单选项，防止后台轮询或 SSE 状态刷新重置用户已选模式/强制重跑开关
+const draftByProject = new Map();
+
 export async function render(state) {
   const root = h("div", { class: "stack-lg", "data-testid": "view-queue" });
   if (!state.currentProjectId) {
     root.append(empty("请先在顶部新建或选择一个项目。"));
     return root;
+  }
+
+  let draft = draftByProject.get(state.currentProjectId);
+  if (!draft) {
+    draft = { documentId: "", mode: "", provider: "", model: "", templateName: "", force: false };
+    draftByProject.set(state.currentProjectId, draft);
   }
 
   const [docs, generations, jobs, ma] = await Promise.all([
@@ -31,17 +40,26 @@ export async function render(state) {
   const docSelect = h(
     "select",
     { "data-testid": "queue-doc-select" },
-    docs.map((d) => h("option", { value: d.id }, `${d.title || d.id}${d.block_count != null ? ` (${d.block_count} 块)` : ""}`))
+    docs.map((d) =>
+      h("option", { value: d.id, selected: d.id === draft.documentId }, `${d.title || d.id}${d.block_count != null ? ` (${d.block_count} 块)` : ""}`)
+    )
   );
+  docSelect.addEventListener("change", () => {
+    draft.documentId = docSelect.value;
+  });
+
   const modeSelect = h(
     "select",
     { "data-testid": "queue-mode-select" },
-    modes.map((m) => h("option", { value: m.id }, `${m.id} — ${m.label}`))
+    modes.map((m) => h("option", { value: m.id, selected: m.id === draft.mode }, `${m.id} — ${m.label}`))
   );
+  modeSelect.addEventListener("change", () => {
+    draft.mode = modeSelect.value;
+  });
 
   // 动态装配可用的 Provider 与模型默认建议
   const providersList = [];
-  const defaultProv = ma?.default_teacher_provider || "ollama";
+  const defaultProv = draft.provider || ma?.default_teacher_provider || "ollama";
   if (ma?.providers) {
     if (ma.providers.ollama?.enabled) {
       providersList.push({
@@ -79,12 +97,17 @@ export async function render(state) {
 
   const modelInput = h("input", {
     list: "queue-models-datalist",
+    value: draft.model || "",
     placeholder: "模型名称（留空用当前提供方默认模型）",
     "data-testid": "queue-model-input",
+  });
+  modelInput.addEventListener("input", () => {
+    draft.model = modelInput.value;
   });
   const modelDatalist = h("datalist", { id: "queue-models-datalist" });
 
   async function syncProviderModels() {
+    draft.provider = providerSelect.value;
     const selected = providersList.find((p) => p.id === providerSelect.value);
     if (selected?.defaultModel && !modelInput.value) {
       modelInput.placeholder = `留空默认：${selected.defaultModel}`;
@@ -99,6 +122,7 @@ export async function render(state) {
   }
   providerSelect.addEventListener("change", () => {
     modelInput.value = "";
+    draft.model = "";
     syncProviderModels();
   });
   syncProviderModels();
@@ -109,8 +133,20 @@ export async function render(state) {
     [
       ["preamble_zh_ctex", "中文学术文档 (ctexart)"],
       ["preamble_en_academic", "英文学术文档 (article)"],
-    ].map(([k, v]) => h("option", { value: k }, v))
+    ].map(([k, v]) => h("option", { value: k, selected: k === draft.templateName }, v))
   );
+  templateSelect.addEventListener("change", () => {
+    draft.templateName = templateSelect.value;
+  });
+
+  const forceCheckbox = h("input", {
+    type: "checkbox",
+    checked: Boolean(draft.force),
+    "data-testid": "queue-force-checkbox",
+  });
+  forceCheckbox.addEventListener("change", () => {
+    draft.force = forceCheckbox.checked;
+  });
 
   const startBtn = h(
     "button",
@@ -127,10 +163,11 @@ export async function render(state) {
             provider: providerSelect.value,
             model: modelInput.value.trim(),
             template_name: templateSelect.value,
+            force: forceCheckbox.checked,
           });
           toast(
             res.reused
-              ? `该文档/模式/模型组合已有运行记录 (${res.job_id})，请直接查看进度`
+              ? `该文档/模式/模型组合已有运行记录 (${res.job_id})；如需重新生成请勾选“强制重跑”`
               : `已提交任务 ${res.job_id} (${res.job_type || "generate"} · ${res.provider})`,
             res.reused ? "warn" : "ok"
           );
@@ -166,7 +203,12 @@ export async function render(state) {
       h(
         "div",
         { class: "row-between" },
-        !isSft ? h("label", { class: "row" }, h("span", { class: "muted" }, "导言区模板："), templateSelect) : h("span"),
+        h(
+          "div",
+          { class: "row", style: { gap: "14px" } },
+          !isSft ? h("label", { class: "row" }, h("span", { class: "muted" }, "导言区模板："), templateSelect) : null,
+          h("label", { class: "check-row", title: "忽略相同文档/模式/模型的幂等复用，创建全新后台任务" }, forceCheckbox, h("span", {}, "强制重跑（忽略缓存）"))
+        ),
         startBtn
       )
     )
@@ -180,21 +222,66 @@ export async function render(state) {
       h("h2", {}, `生成轮次 (${generations.length})`),
       generations.length
         ? table(
-            ["轮次 ID", "模式", "提供方 / 模型", "状态", "产物下载 / 预览", "时间"],
+            ["轮次 ID", "模式", "提供方 / 模型", "状态", "产物 / 诊断", "操作", "时间"],
             generations.map((g) => {
               const links = [];
               if (g.tex_artifact_id) {
-                links.push(h("a", { href: artifactUrl(g.tex_artifact_id), target: "_blank" }, isSft ? "JSONL" : ".tex"));
+                links.push(h("a", { class: "art-chip", href: artifactUrl(g.tex_artifact_id), target: "_blank" }, isSft ? "JSONL" : ".tex"));
               }
               if (g.pdf_artifact_id) {
-                links.push(h("a", { href: artifactUrl(g.pdf_artifact_id), target: "_blank" }, "PDF"));
+                links.push(h("a", { class: "art-chip", href: artifactUrl(g.pdf_artifact_id), target: "_blank" }, "PDF"));
               }
+              const compileLogId = g.stats?.compile?.log_artifact_id;
+              if (compileLogId) {
+                links.push(
+                  h(
+                    "a",
+                    { class: `art-chip${g.status === "failed" ? " is-danger" : ""}`, href: artifactUrl(compileLogId), target: "_blank" },
+                    ".log"
+                  )
+                );
+              }
+              const compileErr = g.status === "failed" ? g.stats?.compile?.error || "" : "";
               return [
                 h("span", { class: "mono" }, g.id),
                 pill(g.mode, "accent"),
                 `${g.provider || "rule"}${g.model ? ` / ${g.model}` : ""}`,
-                pill(g.status, g.status === "succeeded" ? "ok" : g.status === "failed" ? "danger" : "warn"),
-                links.length ? h("div", { class: "row" }, ...links) : "—",
+                h(
+                  "div",
+                  {},
+                  pill(g.status, g.status === "succeeded" ? "ok" : g.status === "failed" ? "danger" : "warn"),
+                  compileErr ? h("div", { class: "job-error-note" }, compileErr) : null
+                ),
+                links.length ? h("div", { class: "art-links" }, ...links) : "—",
+                h(
+                  "div",
+                  { class: "row" },
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      class: "btn ghost sm",
+                      "data-testid": `queue-rerun-${g.id}`,
+                      onClick: async () => {
+                        try {
+                          const r = await api.startGeneration(state.currentProjectId, {
+                            document_id: g.document_id,
+                            mode: g.mode,
+                            provider: g.provider || providerSelect.value,
+                            model: g.model || "",
+                            template_name: templateSelect.value,
+                            force: true,
+                          });
+                          toast(`已强制重跑并提交新任务 ${r.job_id}`, "ok");
+                          window.dispatchEvent(new CustomEvent("gf:refresh"));
+                        } catch (err) {
+                          showError(err);
+                        }
+                      },
+                    },
+                    "强制重跑"
+                  )
+                ),
                 fmtTime(g.created_at),
               ];
             })
@@ -211,8 +298,32 @@ export async function render(state) {
       h("h2", {}, `后台任务队列 (${jobs.length})`),
       jobs.length
         ? table(
-            ["任务 ID", "类型", "状态", "进度 / 阶段", "错误信息", "操作"],
+            ["任务 ID", "类型", "状态", "进度 / 阶段", "产物 / 错误诊断", "操作"],
             jobs.map((j) => {
+              let jobResult = j.result && typeof j.result === "object" ? j.result : null;
+              if (!jobResult && j.result_json) {
+                try {
+                  jobResult = JSON.parse(j.result_json);
+                } catch {
+                  jobResult = null;
+                }
+              }
+              const diagLinks = [];
+              if (jobResult?.tex_artifact_id) {
+                diagLinks.push(h("a", { class: "art-chip", href: artifactUrl(jobResult.tex_artifact_id), target: "_blank" }, isSft ? "JSONL" : ".tex"));
+              }
+              if (jobResult?.pdf_artifact_id) {
+                diagLinks.push(h("a", { class: "art-chip", href: artifactUrl(jobResult.pdf_artifact_id), target: "_blank" }, "PDF"));
+              }
+              if (jobResult?.log_artifact_id) {
+                diagLinks.push(
+                  h(
+                    "a",
+                    { class: `art-chip${j.status === "failed" ? " is-danger" : ""}`, href: artifactUrl(jobResult.log_artifact_id), target: "_blank" },
+                    ".log"
+                  )
+                );
+              }
               const actions = [
                 h(
                   "button",
@@ -266,7 +377,12 @@ export async function render(state) {
                 j.type,
                 pill(j.status, j.status === "succeeded" ? "ok" : j.status === "failed" ? "danger" : "warn"),
                 `${j.progress_done}/${j.progress_total || "?"} (${j.stage || "—"})`,
-                h("span", { class: "muted", style: { maxWidth: "260px", display: "inline-block" } }, j.error || "—"),
+                h(
+                  "div",
+                  { class: "stack", style: { gap: "4px" } },
+                  diagLinks.length ? h("div", { class: "art-links" }, ...diagLinks) : null,
+                  j.error ? h("div", { class: "job-error-note" }, j.error) : !diagLinks.length ? h("span", { class: "muted" }, "—") : null
+                ),
                 h("div", { class: "row" }, ...actions),
               ];
             })

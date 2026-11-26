@@ -33,6 +33,13 @@ INLINE_MATH_RE = re.compile(
     r"(\$\$.+?\$\$|(?<![\w\\])\$[^$\n]*[^$\s]\$(?![\w])|\\\(.+?\\\)|\\\[.+?\\\])",
     re.DOTALL,
 )
+# 行内代码（支持单反引号与双反引号），优先于粗体/斜体提取，避免代码里的 * / _ 被误改
+_INLINE_CODE_RE = re.compile(r"(?<!`)(`+)([^\n]+?)\1(?!`)")
+_BOLD_ITALIC_STAR_RE = re.compile(r"\*\*\*(?!\s)(.+?)(?<!\s)\*\*\*")
+_BOLD_STAR_RE = re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*")
+_BOLD_UNDER_RE = re.compile(r"(?<![A-Za-z0-9_])__(?!\s|_)(.+?)(?<!\s|_)__(?![A-Za-z0-9_])")
+_ITALIC_STAR_RE = re.compile(r"(?<!\*)\*(?!\s|\*)(.+?)(?<!\s|\*)\*(?!\*)")
+_ITALIC_UNDER_RE = re.compile(r"(?<![A-Za-z0-9_])_(?!\s|_)(.+?)(?<!\s|_)_(?![A-Za-z0-9_])")
 LEADING_NUMBER_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)[.、\s]+(.*)$")
 FIGURE_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<src>[^)\s]+)(?P<rest>[^)]*)\)")
 
@@ -91,24 +98,86 @@ def _strip_heading_number(text: str) -> tuple[str, str]:
     return number, match.group(2)
 
 
+def _render_emphasis(segment: str) -> str:
+    """递归转换粗体/斜体并对普通文本进行 LaTeX 转义（占位符 \\x00T0\\x00 保持原样）。"""
+    if not segment:
+        return ""
+    rules: tuple[tuple[re.Pattern[str], str], ...] = (
+        (_BOLD_ITALIC_STAR_RE, "textbf_emph"),
+        (_BOLD_STAR_RE, "textbf"),
+        (_BOLD_UNDER_RE, "textbf"),
+        (_ITALIC_STAR_RE, "emph"),
+        (_ITALIC_UNDER_RE, "emph"),
+    )
+    earliest_match: re.Match[str] | None = None
+    earliest_kind = ""
+    for pattern, kind in rules:
+        match = pattern.search(segment)
+        if match is not None:
+            if earliest_match is None or match.start() < earliest_match.start():
+                earliest_match = match
+                earliest_kind = kind
+    if earliest_match is None:
+        return _escape_plain(segment)
+
+    prefix = _escape_plain(segment[: earliest_match.start()])
+    inner = _render_emphasis(earliest_match.group(1))
+    suffix = _render_emphasis(segment[earliest_match.end() :])
+    if earliest_kind == "textbf_emph":
+        wrapped = f"\\textbf{{\\emph{{{inner}}}}}"
+    elif earliest_kind == "textbf":
+        wrapped = f"\\textbf{{{inner}}}"
+    else:
+        wrapped = f"\\emph{{{inner}}}"
+    return f"{prefix}{wrapped}{suffix}"
+
+
 def _convert_inline(text: str, *, escape_alignment: bool = False) -> str:
-    """段落内联转换：图片 → 引用占位，数学保留。
+    """段落内联转换：按“行内代码 → 数学公式 → 图片 → 强调/转义”顺序处理。
 
-    占位符必须在转义**之后**插入：先插入再转义会把占位符自己的反斜杠也转义掉，
-    PDF 里就会原样出现 "\textbf{[图: ...]}"。
+    行内代码必须在数学公式之前剥离，避免 ``$HOME`` 或 ``a + $x$`` 跨代码块配对成伪公式；
+    数学与代码占位符均在强调解析与转义之前隔离，避免里面的 ``*`` / ``_`` 被当成粗斜体标记。
     """
-    placeholders: list[str] = []
+    tokens: list[str] = []
 
-    def _take(match: re.Match[str]) -> str:
+    def _stash(tex_snippet: str) -> str:
+        idx = len(tokens)
+        tokens.append(tex_snippet)
+        return f"\x00T{idx}\x00"
+
+    # 1. 最先提取行内代码（代码中的 * _ $ \\ 等一律作为字面量放进 \texttt）
+    def _take_code(match: re.Match[str]) -> str:
+        code_body = match.group(2).strip() if len(match.group(1)) > 1 else match.group(2)
+        return _stash(f"\\texttt{{{_escape_plain(code_body)}}}")
+
+    work = _INLINE_CODE_RE.sub(_take_code, text)
+
+    # 2. 再提取数学公式（保留公式内的 * _ & 等符号，仅在表格对齐场景转义裸 &）
+    parts = INLINE_MATH_RE.split(work)
+    math_protected: list[str] = []
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            if escape_alignment:
+                part = re.sub(r"(?<!\\)&", r"\\&", part)
+            math_protected.append(_stash(part))
+        else:
+            math_protected.append(part)
+    work = "".join(math_protected)
+
+    # 3. 提取 Markdown 图片占位（与数学/代码互不干扰）
+    def _take_figure(match: re.Match[str]) -> str:
         alt = match.group("alt") or match.group("src") or ""
-        placeholders.append(f"\\textbf{{[图: {escape_latex(alt)}]}}")
-        return f"\x00{len(placeholders) - 1}\x00"
+        return _stash(f"\\textbf{{[图: {escape_latex(alt)}]}}")
 
-    text = FIGURE_RE.sub(_take, text)
-    text = escape_latex(text, escape_alignment=escape_alignment)
-    for index, placeholder in enumerate(placeholders):
-        text = text.replace(f"\x00{index}\x00", placeholder)
-    return text
+    work = FIGURE_RE.sub(_take_figure, work)
+
+    # 4. 转换剩余普通文本中的粗体/斜体与 LaTeX 特殊字符
+    work = _render_emphasis(work)
+
+    # 5. 逆序还原受保护片段，保证即便外层占位包裹了早先生成的内层占位也能完整展开
+    for idx in range(len(tokens) - 1, -1, -1):
+        work = work.replace(f"\x00T{idx}\x00", tokens[idx])
+    return work
 
 
 # 宿主环境名：这些环境一旦被内容闭合，注入的命令就会逃出原本的上下文
@@ -267,7 +336,7 @@ def render_block(block: Block, teacher_tex: str | None = None) -> tuple[str, lis
         number, content = _strip_heading_number(block.text)
         command = SECTION_COMMANDS.get(block.level, "paragraph")
         label = f"\\label{{{block.block_id}}}"
-        return f"\\{command}{{{escape_latex(content)}}} {label}\n", warnings, assets
+        return f"\\{command}{{{_convert_inline(content)}}} {label}\n", warnings, assets
 
     if kind == "paragraph":
         body = _convert_inline(block.text)

@@ -409,7 +409,8 @@ def project_overview(project_id: str, ctx: AppContext = Depends(get_ctx)) -> dic
 
     budget_state = get_state(ctx.db, project_id, ctx.settings)
     recent_generations = ctx.db.query_all(
-        "SELECT id, mode, status, created_at, updated_at, stats_json FROM generations "
+        "SELECT id, document_id, mode, status, provider, model, tex_artifact_id, pdf_artifact_id, "
+        "created_at, updated_at, stats_json FROM generations "
         "WHERE project_id = ? ORDER BY created_at DESC LIMIT 5",
         (project_id,),
     )

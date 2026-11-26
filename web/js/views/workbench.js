@@ -161,6 +161,10 @@ export async function render(state) {
   if (activeGen?.tex_artifact_id) {
     links.append(h("a", { class: "btn sm", href: artifactUrl(activeGen.tex_artifact_id), target: "_blank", "data-testid": "wb-tex-link" }, isLatex ? "查看 .tex" : "查看产物 JSONL"));
   }
+  const activeLogId = activeGen?.stats?.compile?.log_artifact_id;
+  if (activeLogId) {
+    links.append(h("a", { class: activeGen.status === "failed" ? "btn sm danger" : "btn sm", href: artifactUrl(activeLogId), target: "_blank", "data-testid": "wb-log-link" }, "编译日志 (.log)"));
+  }
   if (activeGen?.pdf_artifact_id) {
     links.append(h("a", { class: "btn sm", href: artifactUrl(activeGen.pdf_artifact_id), target: "_blank", "data-testid": "wb-pdf-link" }, "新标签打开 PDF"));
   }
@@ -184,6 +188,24 @@ export async function render(state) {
       h("div", { class: "row" }, docSelect, genSelect, links)
     )
   );
+
+  // ---- 编译失败提示（直接暴露可点开的 .tex 与 .log 诊断入口）----
+  if (activeGen && activeGen.status === "failed" && isLatex) {
+    const compErr = activeGen.stats?.compile?.error || "LaTeX 编译未通过，请查看编译日志或源码排查。";
+    root.append(
+      h(
+        "div",
+        { class: "alert danger row-between", "data-testid": "wb-compile-error-banner" },
+        h("div", {}, h("strong", {}, "本轮编译失败："), compErr),
+        h(
+          "div",
+          { class: "art-links" },
+          activeGen.tex_artifact_id ? h("a", { class: "art-chip", href: artifactUrl(activeGen.tex_artifact_id), target: "_blank" }, ".tex") : null,
+          activeLogId ? h("a", { class: "art-chip is-danger", href: artifactUrl(activeLogId), target: "_blank" }, ".log") : null
+        )
+      )
+    );
+  }
 
   // ---- 四层质量校验提醒（含截断与 <think> 泄漏报警）----
   if (genDetail?.validation_reports?.length) {

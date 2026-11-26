@@ -15,8 +15,20 @@ from godfather.taskpacks.latex.compiler import (
 )
 
 
-def _make_fake_cli(tmp_path: Path, name: str, py_code: str) -> Path:
-    """生成跨平台可执行的假 CLI（Windows 下自动配 .cmd 包装器）。"""
+def _make_fake_cli(tmp_path: Path, name: str, py_code: str, *, win_cmd: str = "", win_ps1: str = "") -> Path:
+    """生成跨平台可执行的假 CLI（Windows 下使用沙箱内原生的 cmd/PowerShell，避免越界依赖虚拟环境 Python）。"""
+    if os.name == "nt" and (win_cmd or win_ps1):
+        wrapper = tmp_path / f"{name}.cmd"
+        if win_ps1:
+            ps1_file = tmp_path / f"{name}.ps1"
+            ps1_file.write_text(win_ps1, encoding="utf-8")
+            wrapper.write_text(
+                f'@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0{name}.ps1" %*\r\n',
+                encoding="utf-8",
+            )
+        else:
+            wrapper.write_text(win_cmd, encoding="utf-8")
+        return wrapper
     py_file = tmp_path / f"{name}.py"
     py_file.write_text(py_code, encoding="utf-8")
     if os.name == "nt":
@@ -34,16 +46,27 @@ def _make_fake_cli(tmp_path: Path, name: str, py_code: str) -> Path:
 
 @pytest.fixture()
 def fake_engine(tmp_path: Path):
-    """创建一个假 xelatex：记录参数到 argv.txt，生成 main.pdf。"""
+    """创建一个假 xelatex：记录参数到 argv.txt，生成 main.pdf（--version 查询不写产物）。"""
     return _make_fake_cli(
         tmp_path,
         "fake-xelatex",
         "import sys\n"
         "from pathlib import Path\n"
-        "Path('argv.txt').write_text('\\n'.join(sys.argv[1:]) + '\\n', encoding='utf-8')\n"
         "print('This is XeTeX, Version 3.141592653 (Fake)')\n"
-        "print('Output written on main.pdf (1 page).')\n"
-        "Path('main.pdf').write_bytes(b'%PDF-1.7\\n%fake\\n')\n",
+        "if '--version' not in sys.argv[1:]:\n"
+        "    Path('argv.txt').write_text('\\n'.join(sys.argv[1:]) + '\\n', encoding='utf-8')\n"
+        "    print('Output written on main.pdf (1 page).')\n"
+        "    Path('main.pdf').write_bytes(b'%PDF-1.7\\n%fake\\n')\n",
+        win_ps1=(
+            "$utf8 = [System.Text.UTF8Encoding]::new($false)\n"
+            "Write-Output 'This is XeTeX, Version 3.141592653 (Fake)'\n"
+            "if ($args -notcontains '--version') {\n"
+            "    [System.IO.File]::WriteAllLines((Join-Path (Get-Location) 'argv.txt'), $args, $utf8)\n"
+            "    Write-Output 'Output written on main.pdf (1 page).'\n"
+            "    $bytes = [System.Text.Encoding]::ASCII.GetBytes(\"%PDF-1.7`n%fake`n\")\n"
+            "    [System.IO.File]::WriteAllBytes((Join-Path (Get-Location) 'main.pdf'), $bytes)\n"
+            "}\n"
+        ),
     )
 
 
@@ -88,6 +111,7 @@ def test_compile_reports_failure(settings, tmp_path):
         tmp_path,
         "fail-xelatex",
         "import sys\nprint('! Undefined control sequence.')\nprint('l.3 \\\\badcommand')\nsys.exit(1)\n",
+        win_cmd="@echo off\r\necho ! Undefined control sequence.\r\necho l.3 \\badcommand\r\nexit /b 1\r\n",
     )
     settings.latex.binary = str(failing)
     result = compile_tex("x", settings=settings, work_root=tmp_path / "work", job_id="job-2")
@@ -101,6 +125,7 @@ def test_compile_timeout_is_terminated(settings, tmp_path):
         tmp_path,
         "slow-xelatex",
         "import time\ntime.sleep(30)\n",
+        win_cmd='@echo off\r\npowershell.exe -NoProfile -Command "Start-Sleep -Seconds 30"\r\n',
     )
     settings.latex.binary = str(slow)
     settings.latex.timeout_seconds = 2

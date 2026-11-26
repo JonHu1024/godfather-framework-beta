@@ -20,6 +20,7 @@ __CJK_FONTS__
 \usepackage{booktabs}
 \usepackage{longtable}
 \usepackage{array}
+\usepackage{calc}
 \usepackage{caption}
 \usepackage{hyperref}
 \hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
@@ -47,6 +48,8 @@ PREAMBLE_PLAIN = r"""% ===== Godfather 自动生成导言区（无 ctex） =====
 \usepackage{booktabs}
 \usepackage{longtable}
 \usepackage{array}
+\usepackage{calc}
+\usepackage{caption}
 \usepackage{hyperref}
 \usepackage{enumitem}
 \usepackage{fancyvrb}
@@ -69,6 +72,7 @@ __SUBTITLE__
 DEFAULT_TEMPLATES = {
     "preamble_zh_ctex": PREAMBLE_ZH_CTEX,
     "preamble_plain": PREAMBLE_PLAIN,
+    "preamble_en_academic": PREAMBLE_PLAIN,
     "title": TITLE_TEMPLATE,
 }
 

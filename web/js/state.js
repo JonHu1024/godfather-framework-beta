@@ -25,12 +25,21 @@ export function applyTheme(theme) {
   const next = theme === "dark" ? "dark" : "light";
   state.theme = next;
   localStorage.setItem("gf.theme", next);
-  document.documentElement.setAttribute("data-theme", next);
+  const root = document.documentElement;
+  root.classList.add("theme-switching");
+  void root.offsetHeight;
+  root.setAttribute("data-theme", next);
   if (next === "dark") {
     document.body.setAttribute("data-ds-dark-theme", "");
   } else {
     document.body.removeAttribute("data-ds-dark-theme");
   }
+  void root.offsetHeight;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      root.classList.remove("theme-switching");
+    });
+  });
 }
 
 export function applySidebarCollapsed(collapsed) {

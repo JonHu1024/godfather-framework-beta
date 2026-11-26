@@ -1,5 +1,5 @@
 // 项目总览：进度漏斗、预算审计、控制器下一步建议与局域网配对状态
-import { api } from "../api.js";
+import { api, artifactUrl } from "../api.js";
 import { empty, fmtTime, h, modal, pill, pre, showError, statCard, table, toast } from "../ui.js";
 
 export async function render(state) {
@@ -148,19 +148,52 @@ export async function render(state) {
         h("div", { class: "row-between" }, h("h2", {}, "最近生成记录"), h("a", { href: "#/queue", class: "muted", style: { fontSize: "12.5px" } }, "查看全部 →")),
         gens.length
           ? table(
-              ["ID", "模式", "状态", "创建时间"],
-              gens.map((g) => [h("span", { class: "mono" }, g.id), g.mode, pill(g.status, g.status === "succeeded" ? "ok" : g.status === "failed" ? "danger" : "warn"), fmtTime(g.created_at)])
+              ["ID", "模式", "状态", "产物", "创建时间"],
+              gens.map((g) => {
+                const links = [];
+                if (g.tex_artifact_id) {
+                  links.push(h("a", { class: "art-chip", href: artifactUrl(g.tex_artifact_id), target: "_blank" }, ".tex"));
+                }
+                if (g.pdf_artifact_id) {
+                  links.push(h("a", { class: "art-chip", href: artifactUrl(g.pdf_artifact_id), target: "_blank" }, "PDF"));
+                }
+                if (g.stats?.compile?.log_artifact_id) {
+                  links.push(
+                    h(
+                      "a",
+                      {
+                        class: `art-chip${g.status === "failed" ? " is-danger" : ""}`,
+                        href: artifactUrl(g.stats.compile.log_artifact_id),
+                        target: "_blank",
+                      },
+                      ".log"
+                    )
+                  );
+                }
+                return [
+                  h("span", { class: "mono" }, g.id),
+                  g.mode,
+                  pill(g.status, g.status === "succeeded" ? "ok" : g.status === "failed" ? "danger" : "warn"),
+                  links.length ? h("div", { class: "art-links" }, ...links) : "—",
+                  fmtTime(g.created_at),
+                ];
+              })
             )
           : empty("暂无生成记录")
       ),
       h(
         "section",
         { class: "card stack" },
-        h("div", { class: "row-between" }, h("h2", {}, `进行中任务 (${jobs.length})`), h("a", { href: "#/inbox", class: "muted", style: { fontSize: "12.5px" } }, "问题收件箱 →")),
+        h(
+          "div",
+          { class: "row-between" },
+          h("h2", {}, `进行中任务 (${jobs.length})`),
+          h("div", { class: "row" }, h("a", { href: "#/queue", class: "muted", style: { fontSize: "12.5px" } }, "队列 →"), h("a", { href: "#/inbox", class: "muted", style: { fontSize: "12.5px" } }, "收件箱 →"))
+        ),
         jobs.length
           ? table(
               ["任务类型", "状态", "进度", "阶段"],
-              jobs.map((j) => [j.type, pill(j.status, "accent"), `${j.progress_done}/${j.progress_total || "?"}`, j.stage || "queued"])
+              jobs.map((j) => [j.type, pill(j.status, j.status === "failed" ? "danger" : "accent"), `${j.progress_done}/${j.progress_total || "?"}`, j.stage || "queued"])
             )
           : empty("当前队列空闲")
       )

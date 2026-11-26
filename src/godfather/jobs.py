@@ -52,7 +52,11 @@ class JobPaused(Exception):
 
 
 class PermanentJobError(RuntimeError):
-    """确定性失败：重试也不会变好（例如数据为空、预检不通过）。"""
+    """确定性失败：重试也不会变好（例如数据为空、预检不通过、TeX 编译失败）。"""
+
+    def __init__(self, message: str = "", *, result: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.result = result
 
 
 def _iso_in(seconds: float) -> str:
@@ -505,6 +509,11 @@ class JobQueue:
                     level="warning",
                 )
             else:
+                structured_result = (
+                    exc.result
+                    if isinstance(getattr(exc, "result", None), dict)
+                    else {"traceback": trace}
+                )
                 cur = self.db.execute(
                     "UPDATE jobs SET status = ?, error = ?, result_json = ?, finished_at = ?, "
                     "updated_at = ?, lease_owner = '', lease_expires_at = NULL "
@@ -512,7 +521,7 @@ class JobQueue:
                     (
                         STATUS_FAILED,
                         detail,
-                        canonical_json({"traceback": trace}),
+                        canonical_json(structured_result),
                         now_iso(),
                         now_iso(),
                         job["id"],
@@ -536,9 +545,9 @@ class JobQueue:
                     project_id=job["project_id"],
                     job_id=job["id"],
                     stage="failed",
-                    message=f"失败（已达最大重试次数）：{detail}",
+                    message=f"任务失败：{detail}" if permanent else f"失败（已达最大重试次数）：{detail}",
                     level="error",
-                    payload={"traceback": trace},
+                    payload={**structured_result, "traceback": trace} if isinstance(structured_result, dict) else {"traceback": trace},
                 )
         finally:
             stop_heartbeat.set()

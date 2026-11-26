@@ -453,3 +453,348 @@ def test_general_sft_taskpack_end_to_end(client):
     )
     assert snap.status_code == 200
     assert sum(snap.json()["counts"].values()) == 2
+
+
+# --------------------------------------------------------------------------
+# Audit Report Fixes (#1 Windows Sandbox, #2 Pandoc calc & Failed Job State,
+# #3 Inline Markdown Formatting, #4 Force Rerun API)
+# --------------------------------------------------------------------------
+def test_report_bug1_windows_appcontainer_os_isolation_and_fail_closed(tmp_path, monkeypatch):
+    """Windows 编译沙箱必须在 OS 层面拒绝越权路径读写，且初始化失败时严格 fail-closed。"""
+    import os
+    import sys
+    import pytest
+    from godfather.settings import Settings
+    from godfather.taskpacks.latex import compiler as comp
+    from godfather.taskpacks.latex import win_sandbox as ws
+
+    if sys.platform != "win32":
+        pytest.skip("仅适用于 Windows AppContainer 沙箱")
+
+    # 1) 真实 OS 级 AppContainer 隔离：无法读取工作目录外的敏感文件，也无法向外部写入
+    outside_dir = tmp_path / "outside_secret"
+    outside_dir.mkdir()
+    secret_file = outside_dir / "secret.txt"
+    secret_file.write_text("SECRET_TOKEN_987654", encoding="utf-8")
+    pwn_target = outside_dir / "pwn.txt"
+
+    work_dir = tmp_path / "sandbox_work"
+    work_dir.mkdir()
+    cmd_exe = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
+    probe_cmd = (
+        f'type "{secret_file}" & '
+        f'(echo PWNED > "{pwn_target}" 2>nul) & '
+        f'if exist "{pwn_target}" (echo WRITE_OK) else (echo WRITE_BLOCKED)'
+    )
+    res = ws.run_sandboxed(
+        [cmd_exe, "/c", probe_cmd],
+        work_dir=work_dir,
+        env={"PATH": comp._build_environment(work_dir, windows_engine=True).get("PATH", "")},
+        timeout_seconds=30,
+        job_label="isolation-probe",
+    )
+    assert "SECRET_TOKEN_987654" not in res.stdout
+    assert "WRITE_OK" not in res.stdout
+    assert not pwn_target.exists()
+
+    # 2) 初始化失败必须 fail-closed，不能回退到无隔离子进程执行
+    monkeypatch.setattr(
+        comp,
+        "detect_engine",
+        lambda _settings: (cmd_exe, "mock cmd"),
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise ws.SandboxInitError("mock ACL init failure")
+
+    monkeypatch.setattr(ws, "run_sandboxed", _boom)
+    c_res = comp.compile_tex(
+        "\\documentclass{article}\\begin{document}Hi\\end{document}",
+        settings=Settings(),
+        work_root=tmp_path,
+        job_id="failclosed",
+    )
+    assert c_res.ok is False
+    assert c_res.exit_code == -5
+    assert "初始化失败" in c_res.error
+
+
+def test_report_bug1_real_xelatex_chinese_math_and_image_in_sandbox(tmp_path):
+    """在真实 Windows TeX 沙箱内编译中文 ctexart + 数学公式 + 本地图片应正常生成 PDF。"""
+    import sys
+    import pytest
+    from godfather.settings import Settings
+    from godfather.taskpacks.latex import assembler, compiler as comp
+
+    if sys.platform != "win32":
+        pytest.skip("仅在 Windows 上验证 AppContainer + xelatex 联调")
+    binary, _ = comp.detect_engine(Settings())
+    if not binary:
+        pytest.skip("当前环境未检测到可用 LaTeX 引擎")
+
+    fig_path = Path(__file__).resolve().parent.parent / "examples" / "figures" / "overview.png"
+    assert fig_path.exists()
+    assets = {"figures/overview.png": fig_path.read_bytes()}
+
+    parsed = parse_markdown(
+        "# 中文测试\n\n正文中包含数学公式 $E = mc^2$ 与本地图片：\n\n![系统总览](figures/overview.png)\n"
+    )
+    assembled = assembler.assemble_document(
+        parsed.blocks,
+        settings=Settings(),
+        title="沙箱实测",
+        template_name="preamble_zh_ctex",
+    )
+    res = comp.compile_tex(
+        assembled.tex,
+        settings=Settings(),
+        work_root=tmp_path,
+        job_id="real_sandbox_zh",
+        assets=assets,
+    )
+    assert res.ok, f"XeLaTeX 沙箱编译失败：{res.error}\n{res.log[-800:]}"
+    pdf_file = Path(res.pdf_path)
+    assert pdf_file.exists()
+    assert pdf_file.read_bytes().startswith(b"%PDF-")
+
+
+def test_report_bug2_pandoc_calc_table_compiles(tmp_path):
+    """内置模板必须加载 calc 宏包（含 preamble_en_academic 映射），并能编译 Pandoc 比例列宽表格。"""
+    import pytest
+    from godfather.settings import Settings
+    from godfather.taskpacks.latex import compiler as comp
+    from godfather.taskpacks.latex.pipeline import wrap_body
+    from godfather.taskpacks.latex.templates import DEFAULT_TEMPLATES, PREAMBLE_PLAIN, PREAMBLE_ZH_CTEX
+
+    assert r"\usepackage{calc}" in PREAMBLE_ZH_CTEX
+    assert r"\usepackage{calc}" in PREAMBLE_PLAIN
+    assert r"\usepackage{caption}" in PREAMBLE_PLAIN
+    assert DEFAULT_TEMPLATES["preamble_en_academic"] == PREAMBLE_PLAIN
+
+    binary, _ = comp.detect_engine(Settings())
+    if not binary:
+        pytest.skip("当前环境未检测到可用 LaTeX 引擎")
+
+    pandoc_table_tex = (
+        r"\begin{longtable}[]{@{}"
+        "\n"
+        r"  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}"
+        "\n"
+        r"  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}"
+        "\n"
+        r"  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3334}}@{}}"
+        "\n"
+        r"\toprule\noalign{}"
+        "\n"
+        r"字段 & 说明 & 示例 \\"
+        "\n"
+        r"\midrule\noalign{}"
+        "\n"
+        r"\endhead"
+        "\n"
+        r"\bottomrule\noalign{}"
+        "\n"
+        r"\endlastfoot"
+        "\n"
+        r"\textbf{粗体} & 数学 $x_1 + y_2$ & \texttt{code\_ok} \\"
+        "\n"
+        r"\end{longtable}"
+    )
+
+    for idx, tpl_name in enumerate(("preamble_zh_ctex", "preamble_en_academic")):
+        doc = wrap_body(
+            pandoc_table_tex,
+            Settings(),
+            template_name=tpl_name,
+            title="Pandoc Table",
+        )
+        res = comp.compile_tex(doc, settings=Settings(), work_root=tmp_path, job_id=f"pandoc_calc_{idx}")
+        assert res.ok, f"模板 {tpl_name} 编译 Pandoc 表格失败：{res.error}\n{res.log[-600:]}"
+        assert Path(res.pdf_path).read_bytes().startswith(b"%PDF-")
+
+
+def test_report_bug2_compile_failure_propagates_to_job_and_preserves_artifacts(client, monkeypatch):
+    """编译或校验失败时，队列任务状态必须同步标记为 failed 且保留可读的 .tex 与编译 .log 产物。"""
+    from godfather.taskpacks.latex import compiler as comp
+    from godfather.taskpacks.latex.compiler import CompileResult
+
+    def _fake_fail_compile(tex_source: str, *, settings, work_root: Path, job_id: str = "manual", **_kwargs):
+        work_dir = Path(work_root) / "compile" / job_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        tex_p = work_dir / "main.tex"
+        log_p = work_dir / "main.log"
+        tex_p.write_text(tex_source, encoding="utf-8")
+        log_text = "This is mock XeTeX\n! Undefined control sequence.\nl.12 \\badmacro\n"
+        log_p.write_text(log_text, encoding="utf-8")
+        return CompileResult(
+            ok=False,
+            engine="xelatex",
+            binary="mock-xelatex",
+            exit_code=1,
+            log=log_text,
+            log_path=str(log_p),
+            pdf_path="",
+            duration_ms=25,
+            error="Undefined control sequence (l.12)",
+            work_dir=str(work_dir),
+        )
+
+    monkeypatch.setattr(comp, "compile_tex", _fake_fail_compile)
+
+    prj = client.post("/api/projects", json={"name": "失败回传测试"}).json()
+    up = client.post(
+        f"/api/projects/{prj['id']}/materials",
+        data={"kind": "markdown", "filename": "bad.md"},
+        files={"file": ("bad.md", io.BytesIO("# 测试失败回传\n\n正文字段。\n".encode("utf-8")), "text/markdown")},
+    )
+    assert up.status_code == 200
+    doc_id = up.json()["document_id"]
+
+    gen_resp = client.post(
+        f"/api/projects/{prj['id']}/generations",
+        json={"document_id": doc_id, "mode": "rule_only"},
+    )
+    assert gen_resp.status_code == 200
+    job_id = gen_resp.json()["job_id"]
+    drain_jobs(client.app.state.ctx)
+
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "failed"
+    assert job["error"]
+    assert job["result"]["compile_ok"] is False
+    assert job["result"]["verdict"] == "fail"
+    assert job["result"]["tex_artifact_id"]
+    assert job["result"]["log_artifact_id"]
+
+    gens = client.get(f"/api/projects/{prj['id']}/generations").json()
+    assert len(gens) == 1
+    g = gens[0]
+    assert g["status"] == "failed"
+    assert g["tex_artifact_id"] == job["result"]["tex_artifact_id"]
+    log_art_id = g["stats"]["compile"]["log_artifact_id"]
+    assert log_art_id == job["result"]["log_artifact_id"]
+
+    tex_content = client.get(f"/api/artifacts/{g['tex_artifact_id']}/content")
+    log_content = client.get(f"/api/artifacts/{log_art_id}/content")
+    assert tex_content.status_code == 200
+    assert "\\documentclass" in tex_content.text
+    assert log_content.status_code == 200
+    assert "Undefined control sequence" in log_content.text
+
+
+def test_report_bug3_rule_only_inline_formatting_and_math_code_priority(tmp_path):
+    """纯规则模式必须准确转换粗体/斜体/行内代码，并优先保护数学与代码中的 * 和 _。"""
+    from godfather.settings import Settings
+    from godfather.taskpacks.latex import assembler, compiler as comp
+
+    md_text = (
+        "# 包含 **加粗标题** 与 *斜体词* 的小节\n\n"
+        "普通段落支持 **粗体**、*斜体*、__双下划线粗体__、_单下划线斜体_、***粗斜体***。\n\n"
+        "行内代码 `snake_case * 2 + $x$` 与数学公式 $a_1 * b_2$ 和字面乘号 2 * 3 * 4 必须互不干扰。\n\n"
+        "| 名称 | **格式** | 公式与代码 |\n"
+        "| :--- | :---: | ---: |\n"
+        "| 项1 | __关键__ | $\\alpha_1 & \\beta_2$ 与 `foo_bar * 1` |\n"
+    )
+    parsed = parse_markdown(md_text)
+    assembled = assembler.assemble_document(
+        parsed.blocks,
+        settings=Settings(),
+        title="行内格式测试",
+        template_name="preamble_zh_ctex",
+    )
+    tex = assembled.tex
+    body = tex.split(r"\begin{document}", 1)[1]
+
+    assert r"\textbf{加粗标题}" in body
+    assert r"\emph{斜体词}" in body
+    assert r"\textbf{粗体}" in body
+    assert r"\emph{斜体}" in body
+    assert r"\textbf{双下划线粗体}" in body
+    assert r"\emph{单下划线斜体}" in body
+    assert r"\textbf{\emph{粗斜体}}" in body
+    assert r"\texttt{snake\_case * 2 + \$x\$}" in body
+    assert "$a_1 * b_2$" in body
+    assert r"$\alpha_1 \& \beta_2$" in body
+    assert r"\texttt{foo\_bar * 1}" in body
+    assert "**粗体**" not in body
+    assert "*斜体*" not in body
+
+    binary, _ = comp.detect_engine(Settings())
+    if binary:
+        res = comp.compile_tex(tex, settings=Settings(), work_root=tmp_path, job_id="rule_inline")
+        assert res.ok, f"规则模式行内格式编译失败：{res.error}\n{res.log[-600:]}"
+        assert Path(res.pdf_path).read_bytes().startswith(b"%PDF-")
+
+
+def test_report_bug4_generation_api_force_rerun(client, monkeypatch):
+    """生成 API 默认复用既有任务（force=False），传入 force=True 时必须创建新 job_id 并保留两轮产物。"""
+    from godfather.taskpacks.latex import compiler as comp
+    from godfather.taskpacks.latex.compiler import CompileResult
+
+    compile_calls = []
+
+    def _fake_ok_compile(tex_source: str, *, settings, work_root: Path, job_id: str = "manual", **_kwargs):
+        compile_calls.append(job_id)
+        work_dir = Path(work_root) / "compile" / job_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        tex_p = work_dir / "main.tex"
+        log_p = work_dir / "main.log"
+        pdf_p = work_dir / "main.pdf"
+        tex_p.write_text(tex_source, encoding="utf-8")
+        log_p.write_text(f"compiled {job_id}\n", encoding="utf-8")
+        pdf_p.write_bytes(b"%PDF-1.4\n1 0 obj <<>> endobj\ntrailer <<>>\n%%EOF\n")
+        return CompileResult(
+            ok=True,
+            engine="xelatex",
+            binary="mock-xelatex",
+            exit_code=0,
+            log=f"compiled {job_id}\n",
+            log_path=str(log_p),
+            pdf_path=str(pdf_p),
+            duration_ms=10,
+            work_dir=str(work_dir),
+        )
+
+    monkeypatch.setattr(comp, "compile_tex", _fake_ok_compile)
+
+    prj = client.post("/api/projects", json={"name": "强制重跑测试"}).json()
+    up = client.post(
+        f"/api/projects/{prj['id']}/materials",
+        data={"kind": "markdown", "filename": "doc.md"},
+        files={"file": ("doc.md", io.BytesIO("# 重跑验证\n\n**加粗**文本。\n".encode("utf-8")), "text/markdown")},
+    )
+    assert up.status_code == 200
+    doc_id = up.json()["document_id"]
+
+    payload = {"document_id": doc_id, "mode": "rule_only", "template_name": "preamble_zh_ctex"}
+    r1 = client.post(f"/api/projects/{prj['id']}/generations", json=payload)
+    assert r1.status_code == 200
+    assert r1.json()["reused"] is False
+    job_1 = r1.json()["job_id"]
+    drain_jobs(client.app.state.ctx)
+
+    # force=False（默认）复用已有任务，不触发第二次编译
+    r2 = client.post(f"/api/projects/{prj['id']}/generations", json={**payload, "force": False})
+    assert r2.status_code == 200
+    assert r2.json()["reused"] is True
+    assert r2.json()["job_id"] == job_1
+    assert len(compile_calls) == 1
+
+    # force=True 忽略幂等复用，创建全新的 job_id 并生成第 2 轮产物
+    r3 = client.post(f"/api/projects/{prj['id']}/generations", json={**payload, "force": True})
+    assert r3.status_code == 200
+    assert r3.json()["reused"] is False
+    job_2 = r3.json()["job_id"]
+    assert job_2 != job_1
+    assert json.loads(client.app.state.ctx.queue.get(job_2)["payload_json"])["force"] is True
+    drain_jobs(client.app.state.ctx)
+
+    assert len(compile_calls) == 2
+    gens = client.get(f"/api/projects/{prj['id']}/generations").json()
+    assert len(gens) == 2
+    assert gens[0]["id"] != gens[1]["id"]
+    for g in gens:
+        assert g["status"] == "succeeded"
+        assert client.get(f"/api/artifacts/{g['tex_artifact_id']}/content").status_code == 200
+        assert client.get(f"/api/artifacts/{g['pdf_artifact_id']}/content").status_code == 200
+

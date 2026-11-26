@@ -9,8 +9,10 @@ export class PdfView {
     this.doc = null;
     this.pages = [];
     this.texts = [];
-    this.scale = 1.25;
+    this.scale = 1.0;
     this.zoomFactor = 1.0;
+    this._pageWidthPt = 595;
+    this._renderEpoch = 0;
     this._observer = null;
     this._resizeObserver = null;
     this._resizeRaf = null;
@@ -19,6 +21,7 @@ export class PdfView {
 
   /** 释放文档、观察器与对象 URL（视图离开时应调用）。 */
   destroy() {
+    this._renderEpoch += 1;
     if (this._resizeRaf !== null) {
       cancelAnimationFrame(this._resizeRaf);
       this._resizeRaf = null;
@@ -43,11 +46,12 @@ export class PdfView {
     return this.doc ? this.doc.numPages : 0;
   }
 
-  /** 按容器宽度自适应缩放，并叠加用户手动缩放系数。 */
-  fitScale() {
+  /** 按容器宽度自适应缩放，并叠加用户手动缩放系数（扣除 .pdf-stage 左右 36px 内边距与滚动条余量）。 */
+  fitScale(pageWidthPt = this._pageWidthPt || 595) {
     const width = this.container.clientWidth || 0;
-    const base = width ? Math.max(0.4, Math.min(2.0, (width - 24) / 595)) : 1.25;
-    const effective = Math.max(0.4, Math.min(3.2, base * (this.zoomFactor || 1.0)));
+    const avail = Math.max(0, width - 44);
+    const base = avail ? Math.max(0.35, Math.min(2.0, avail / (pageWidthPt || 595))) : 0.85;
+    const effective = Math.max(0.35, Math.min(3.2, base * (this.zoomFactor || 1.0)));
     return Math.round(effective * 100) / 100;
   }
 
@@ -58,6 +62,7 @@ export class PdfView {
   }
 
   rerenderAll() {
+    this._renderEpoch += 1;
     this.scale = this.fitScale();
     for (const holder of this.container.querySelectorAll("[data-page]")) {
       holder.dataset.rendered = "";
@@ -106,7 +111,7 @@ export class PdfView {
       const holder = document.createElement("div");
       holder.className = "pdf-canvas-wrap";
       holder.dataset.page = String(number);
-      holder.innerHTML = `<div style="width:600px;height:800px;color:#999;font-size:12px;padding:8px">第 ${number} 页</div>`;
+      holder.innerHTML = `<div style="width:100%;max-width:480px;height:680px;color:#999;font-size:12px;padding:8px">第 ${number} 页</div>`;
       this.container.append(holder);
       // 每一页都要 observe：只 observe 已渲染的页会让第 2 页起永远停留在占位块，
       // 连带 findPageOfText 只能搜到第 1 页。
@@ -120,9 +125,10 @@ export class PdfView {
         if (this._resizeRaf !== null) cancelAnimationFrame(this._resizeRaf);
         this._resizeRaf = requestAnimationFrame(() => {
           this._resizeRaf = null;
-          if (!this.doc) return;
+          if (!this.doc || !this.container.isConnected || !this.container.clientWidth) return;
           const next = this.fitScale();
           if (Math.abs(next - this.scale) < 0.02) return;
+          this._renderEpoch += 1;
           this.scale = next;
           // 只清掉 canvas 与文本层：**不能整块 innerHTML=""**，
           // 那会把 .annot-layer 一起抹掉，所有批注框消失且不会重绘。
@@ -132,7 +138,15 @@ export class PdfView {
               if (!child.classList.contains("annot-layer")) child.remove();
             }
           }
-          if (this.doc) this._renderPage(1).catch(() => {});
+          if (this.doc) {
+            for (const holder of this.container.querySelectorAll("[data-page]")) {
+              const rect = holder.getBoundingClientRect();
+              if (rect.bottom >= -200 && rect.top <= (window.innerHeight || 900) + 400) {
+                this._renderPage(Number(holder.dataset.page)).catch(() => {});
+              }
+            }
+            if (this.doc.numPages > 0) this._renderPage(1).catch(() => {});
+          }
         });
       });
       this._resizeObserver.observe(this.container);
@@ -156,28 +170,32 @@ export class PdfView {
     const holder = this.container.querySelector(`[data-page="${number}"]`);
     if (!holder || holder.dataset.rendered === "1") return;
     holder.dataset.rendered = "1";
+    const epoch = this._renderEpoch;
     let page;
     try {
       page = await this.doc.getPage(number);
-      if (!this.doc) return;
+      if (!this.doc || epoch !== this._renderEpoch) return;
     } catch (err) {
       // 失败或文档已被销毁时复位标记
       holder.dataset.rendered = "";
       if (!this.doc || String(err?.message || "").includes("Transport destroyed")) return;
       throw err;
     }
-    this.scale = this.fitScale();
+    const baseViewport = page.getViewport({ scale: 1.0 });
+    this._pageWidthPt = baseViewport.width || 595;
+    this.scale = this.fitScale(this._pageWidthPt);
     const viewport = page.getViewport({ scale: this.scale });
     const canvas = document.createElement("canvas");
     canvas.width = Math.floor(viewport.width);
     canvas.height = Math.floor(viewport.height);
+    const context = canvas.getContext("2d");
+    await page.render({ canvasContext: context, viewport }).promise;
+    if (!this.doc || epoch !== this._renderEpoch) return;
     // 重绘单页时同样只清理非批注层节点，保留 .annot-layer 与已有批注框
     for (const child of [...holder.children]) {
       if (!child.classList.contains("annot-layer")) child.remove();
     }
     holder.prepend(canvas);
-    const context = canvas.getContext("2d");
-    await page.render({ canvasContext: context, viewport }).promise;
 
     // 文本层：用于把页面内容与源块对应起来
     const textLayer = document.createElement("div");

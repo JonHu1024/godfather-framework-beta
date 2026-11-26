@@ -1,0 +1,77 @@
+# Godfather 配置文件示例
+# 复制为 config/config.yaml 即可生效；也可直接在浏览器「模型接入中心」在线热修改（保存在 data/runtime_config.json）。
+
+server:
+  host: "127.0.0.1"
+  port: 8760
+  lan_bind: false                 # 若需手机/同局域网打开设为 true，将强制启用项目级配对码
+  lan_host: "0.0.0.0"
+  pairing_code_ttl_seconds: 600
+
+storage:
+  data_dir: "./data"
+  max_upload_bytes: 33554432      # 单文件上传限制（默认 32MB）
+  templates_dir: "./config/templates"
+  plugins_dir: "./plugins"        # 外部热插拔 Cordis 插件扫描目录
+
+worker:
+  mode: "embedded"                # embedded（随 API 进程启动）或 external
+  poll_interval_seconds: 0.5
+  lease_seconds: 120
+  gpu_wait_seconds: 900
+  max_attempts: 3
+  max_jobs: 2
+
+providers:
+  default_teacher_provider: "ollama"  # 可选：ollama / openai_compatible / manual_import
+  ollama:
+    enabled: true
+    base_url: "http://127.0.0.1:11434"
+    timeout_seconds: 180
+    teacher_model: "qwen2.5:7b"
+    seed: 42
+  openai_compatible:
+    enabled: false
+    display_name: "DeepSeek / 远程兼容 API"
+    base_url: "https://api.deepseek.com/v1"
+    api_key: ""                   # 建议在 UI 中保存或通过 GODFATHER_OPENAI_API_KEY 传入
+    teacher_model: "deepseek-chat"
+    timeout_seconds: 180
+    max_tokens: 4096
+    strip_think_tags: true        # 自动剥离 <think>...</think>
+    pricing_known: false          # 是否按已知单价计费（false 则仅计 token 数与调用次数）
+    input_price_per_1m_cents: 0.0
+    output_price_per_1m_cents: 0.0
+  manual:
+    enabled: true
+
+budget:
+  paid_calls_enabled: false       # 开启按单价付费 API 前请显式置为 true（也可在界面「模型接入中心」一键切换）
+  total_cents: 0
+  per_call_cents: 0
+  max_calls: 200
+  max_seconds: 3600
+
+latex:
+  engine: "xelatex"
+  binary: ""                      # 留空自动搜寻 PATH；Windows 可填如 D:/Environment/texlive/2025/bin/windows/xelatex.exe
+  candidates:
+    - "xelatex"
+  timeout_seconds: 180
+  passes: 2
+  fontset: "auto"                 # auto | windows | fandol | manual
+  cjk_main_font: "Noto Serif SC"
+  cjk_sans_font: "Noto Sans SC"
+  cjk_mono_font: "Noto Sans Mono CJK SC"
+
+pandoc:
+  binary: "pandoc"
+  markdown_extensions:
+    - "tex_math_dollars"
+    - "pipe_tables"
+
+export:
+  llama_cpp_dir: ""               # llama.cpp 仓库根目录（需含 convert_hf_to_gguf.py 与编译好的 llama-quantize）
+  ollama_bin: "ollama"
+  quantize_method: "q4_k_m"
+  model_name_prefix: "godfather-latex"

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#f9fafb" />
+  <title>Godfather</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230f1115' stroke-width='1.9'%3E%3Crect x='3.5' y='3.5' width='17' height='17' rx='5'/%3E%3Cpath d='M9 9.5h6M9 14.5h4' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<div id="app" class="app-shell">
+  <div id="nav-backdrop" class="nav-backdrop hidden"></div>
+
+  <nav class="sidenav" id="sidenav" aria-label="主导航" data-testid="sidenav">
+    <div class="sidebar-head">
+      <a class="brand" href="#/dashboard" data-testid="brand-home" title="Godfather Workbench">
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3.5" y="3.5" width="17" height="17" rx="5" />
+            <path d="M8.5 9.5h7M8.5 14.5h4.5" />
+          </svg>
+        </span>
+        <span class="brand-text">Godfather</span>
+      </a>
+      <button id="btn-sidebar-collapse" class="icon-btn sidebar-toggle" type="button" title="折叠或展开侧栏" aria-label="折叠或展开侧栏" data-testid="btn-sidebar-collapse">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="2.5" width="12" height="11" rx="2.5" />
+          <path d="M6 2.5v11" />
+        </svg>
+      </button>
+    </div>
+
+    <div class="sidebar-action-row">
+      <button id="btn-new-project" class="new-session-btn" type="button" title="新建项目" aria-label="新建项目" data-testid="btn-new-project">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+        <span class="new-session-label">新建项目</span>
+      </button>
+    </div>
+
+    <div class="sidebar-scroll">
+      <div class="nav-group">
+        <div class="nav-group-label">工作区</div>
+        <a href="#/dashboard" data-nav="dashboard" data-testid="nav-dashboard" title="总览">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="5" height="5" rx="1.2"/><rect x="9" y="2" width="5" height="5" rx="1.2"/><rect x="2" y="9" width="5" height="5" rx="1.2"/><rect x="9" y="9" width="5" height="5" rx="1.2"/></svg>
+          <span class="nav-label">总览</span>
+        </a>
+        <a href="#/materials" data-nav="materials" data-testid="nav-materials" title="材料">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4.5A1.5 1.5 0 0 1 4 3h3l1.3 1.5H12A1.5 1.5 0 0 1 13.5 6v5.5A1.5 1.5 0 0 1 12 13H4a1.5 1.5 0 0 1-1.5-1.5V4.5z"/></svg>
+          <span class="nav-label">材料</span>
+        </a>
+        <a href="#/documents" data-nav="documents" data-testid="nav-documents" title="文档">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h5.5L13 6v7.5A1.5 1.5 0 0 1 11.5 15h-7A1.5 1.5 0 0 1 3 13.5V4A1.5 1.5 0 0 1 4.5 2.5z"/><path d="M9.5 2.5V6H13"/></svg>
+          <span class="nav-label">文档</span>
+        </a>
+        <a href="#/queue" data-nav="queue" data-testid="nav-queue" title="生成与队列">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg>
+          <span class="nav-label">生成与队列</span>
+          <span class="nav-badge hidden" id="badge-jobs">0</span>
+        </a>
+        <a href="#/workbench" data-nav="workbench" data-testid="nav-workbench" title="批注工作台">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6 2.5v11M10.5 2.5v11"/></svg>
+          <span class="nav-label">批注工作台</span>
+          <span class="nav-badge hidden" id="badge-ann">0</span>
+        </a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-label">数据与训练</div>
+        <a href="#/policy" data-nav="policy" data-testid="nav-policy" title="策略规则">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h10M5 8h6M6.5 12h3"/></svg>
+          <span class="nav-label">策略规则</span>
+        </a>
+        <a href="#/datasets" data-nav="datasets" data-testid="nav-datasets" title="样本与快照">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="2"/><path d="M3 4.2v3.8c0 1.1 2.24 2 5 2s5-.9 5-2V4.2M3 8v3.8c0 1.1 2.24 2 5 2s5-.9 5-2V8"/></svg>
+          <span class="nav-label">样本与快照</span>
+        </a>
+        <a href="#/training" data-nav="training" data-testid="nav-training" title="训练与模型">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 11.5l3.5-4 2.5 2.5 4.5-5.5"/><path d="M10.5 4.5H13v2.5"/></svg>
+          <span class="nav-label">训练与模型</span>
+        </a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-label">系统</div>
+        <a href="#/models" data-nav="models" data-testid="nav-models" title="模型接入">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="4.5" width="7" height="7" rx="1.5"/><path d="M6.5 2v2.5M9.5 2v2.5M6.5 11.5V14M9.5 11.5V14M2 6.5h2.5M2 9.5h2.5M11.5 6.5H14M11.5 9.5H14"/></svg>
+          <span class="nav-label">模型接入</span>
+        </a>
+        <a href="#/plugins" data-nav="plugins" data-testid="nav-plugins" title="插件管理">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.5v2.2a1.3 1.3 0 0 0 2.6 0V2.5M3.5 5.5h9v3a2.5 2.5 0 0 1-2.5 2.5H8v2.5H6V11A2.5 2.5 0 0 1 3.5 8.5v-3z"/></svg>
+          <span class="nav-label">插件管理</span>
+        </a>
+        <a href="#/inbox" data-nav="inbox" data-testid="nav-inbox" title="收件箱">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 9.5h3.2l1.2 1.8h2.2l1.2-1.8h3.2"/><rect x="2.5" y="3" width="11" height="10" rx="2"/></svg>
+          <span class="nav-label">收件箱</span>
+          <span class="nav-badge hidden" id="badge-inbox">0</span>
+        </a>
+        <a href="#/guide" data-nav="guide" data-testid="nav-guide" title="使用说明">
+          <svg class="nav-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.75"/><path d="M8 7.5v3.5M8 5.3v.2"/></svg>
+          <span class="nav-label">使用说明</span>
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="center-col">
+    <header class="topbar" data-testid="topbar">
+      <div class="topbar-left">
+        <button id="btn-nav-toggle" class="icon-btn mobile-only" type="button" title="导航菜单" aria-label="展开导航菜单" data-testid="nav-toggle">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
+        </button>
+        <div class="project-switch" data-testid="project-switch">
+          <label class="sr-only" for="project-select">切换当前项目</label>
+          <select id="project-select" aria-label="选择项目" data-testid="project-select"></select>
+          <span id="project-taskpack-badge" class="pill pill-muted" title="当前任务包" data-testid="project-taskpack-badge">—</span>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <button id="btn-active-jobs-pill" class="pill pill-muted clickable hidden" type="button" title="查看运行中的任务" data-testid="active-jobs-pill">任务 0</button>
+        <span id="conn-status" class="pill pill-muted" role="status" aria-live="polite" data-testid="conn-status">连接中</span>
+        <button id="btn-theme" class="icon-btn" type="button" title="切换明暗主题" aria-label="切换主题" data-testid="btn-theme">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11A5.5 5.5 0 0 0 8 2.5z" fill="currentColor"/></svg>
+        </button>
+        <button id="btn-preflight" class="btn sm" type="button" data-testid="btn-preflight">环境自检</button>
+      </div>
+    </header>
+
+    <main id="main" class="main" data-testid="main-content">
+      <div class="loading">加载中…</div>
+    </main>
+  </div>
+
+  <div id="toast-host" role="status" aria-live="polite" class="toast-host" data-testid="toast-host"></div>
+
+  <dialog id="modal" class="modal" aria-labelledby="modal-title" data-testid="modal">
+    <form class="modal-inner">
+      <div class="modal-header">
+        <h3 id="modal-title">标题</h3>
+        <button type="button" id="modal-close-x" class="icon-btn" aria-label="关闭弹窗" data-testid="modal-close-x">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>
+        </button>
+      </div>
+      <div id="modal-body" class="modal-body" data-testid="modal-body"></div>
+      <menu class="modal-actions">
+        <button type="button" id="modal-cancel" class="btn ghost" data-testid="modal-cancel">取消</button>
+        <button type="button" id="modal-ok" class="btn primary" data-testid="modal-ok">确定</button>
+      </menu>
+    </form>
+  </dialog>
+</div>
+
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
